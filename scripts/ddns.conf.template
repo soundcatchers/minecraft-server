@@ -1,0 +1,10 @@
+# DuckDNS credentials for the Minecraft server's dynamic DNS updater.
+# This file is read by update.sh and must stay chmod 600 - the token is a
+# credential. Never commit it to the minecraft-server git repo (it is public).
+
+# Just the subdomain label, with no ".duckdns.org" suffix.
+# e.g. if you registered sonicart.duckdns.org, put: sonicart
+DUCKDNS_DOMAIN=PASTE-YOUR-SUBDOMAIN-HERE
+
+# The token shown at the top of https://www.duckdns.org once signed in.
+DUCKDNS_TOKEN=PASTE-YOUR-TOKEN-HERE

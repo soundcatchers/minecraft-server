@@ -11,6 +11,9 @@ Group=minecraft
 WorkingDirectory=/mnt/ssd/minecraft-server
 
 # Optimized Java startup with Aikar's flags for 3GB RAM
+# NOTE: scripts/auto-update.sh rewrites the paper-*.jar filename below (sed) and
+# reloads systemd each time it installs a new Paper build, so the version here is
+# only the value at the time of the last commit, not something to maintain by hand.
 ExecStart=/usr/bin/java -Xms3G -Xmx3G \
   -XX:+AlwaysPreTouch \
   -XX:+DisableExplicitGC \
@@ -31,7 +34,7 @@ ExecStart=/usr/bin/java -Xms3G -Xmx3G \
   -XX:SurvivorRatio=32 \
   -Dusing.aikars.flags=https://mcflags.emc.gs \
   -Daikars.new.flags=true \
-  -jar paper-1.21.11-62.jar nogui
+  -jar paper-1.21.11-69.jar nogui
 
 # Standard input/output
 StandardInput=null

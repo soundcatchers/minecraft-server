@@ -1,0 +1,10 @@
+[Unit]
+Description=Dynamic DNS update (DuckDNS) for the Minecraft server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=minecraft
+Group=minecraft
+ExecStart=/home/minecraft/ddns/update.sh

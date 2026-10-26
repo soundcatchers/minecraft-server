@@ -7,10 +7,12 @@ A complete setup for running a cross-platform Minecraft server (Java + Bedrock) 
 - **PaperMC Server**: Optimized Minecraft server (auto-updates to latest)
 - **Cross-Platform**: Java and Bedrock players can play together
 - **Geyser + Floodgate**: Bedrock players connect without Java accounts
+- **NetherNet**: Supports the current Bedrock transport, with RakNet in parallel
 - **ViaVersion**: Version compatibility support
 - **Optimized Performance**: Aikar's flags for smooth gameplay
 - **Auto-Start**: Systemd service for boot-on-startup
 - **Auto-Updates**: Daily automatic updates with world backups
+- **Dynamic DNS**: Public hostname kept current automatically, so a changed ISP address does not break remote play
 - **USB SSD Support**: Better performance than SD card
 
 ## Quick Start
@@ -115,9 +117,59 @@ sudo systemctl status minecraft
 | Edition | Address | Port |
 |---------|---------|------|
 | Java | `<your-pi-ip>` | 25565 |
-| Bedrock | `<your-pi-ip>` | 19132 |
+| Bedrock, on the LAN | `<your-pi-ip>` | 38314 |
+| Bedrock, from the internet | your public hostname | 38314 |
 
 Find your Pi's IP: `hostname -I`
+
+Players always use port **38314** whichever Bedrock transport they end up on. The
+NetherNet gameplay port (38315) is handed to the client automatically during
+signaling and is never entered by hand.
+
+### Ports that must be open
+
+| Protocol | Port | Purpose |
+|----------|------|---------|
+| UDP | 38314 | Bedrock gameplay over RakNet (legacy transport) |
+| TCP | 38314 | NetherNet signaling |
+| UDP | 38315 | NetherNet gameplay (WebRTC) |
+| TCP | 25565 | Java Edition, if you want external Java players |
+
+If the server sits behind more than one router (double NAT), every one of these
+needs a matching forwarding rule on **each** router in the path.
+
+## Bedrock Transport (NetherNet)
+
+Bedrock 26.60 removed RakNet from clients, so a RakNet-only server is unreachable
+by current Bedrock clients. Geyser build 1237 or later is required. The relevant
+settings in `plugins/Geyser-Spigot/config.yml`:
+
+```yaml
+bedrock:
+  address: 0.0.0.0
+  port: 38314
+  webrtc-port: 38315      # must differ from "port" while transport is "both"
+  transport: both         # "both" = NetherNet + RakNet; "nethernet" = NetherNet only
+  signaling:
+    mode: builtin         # serves signaling on the Bedrock port over TCP
+    advertise-addresses: []
+    stun-discovery: true
+```
+
+Changing `transport` or `signaling` requires a full server restart, not a reload.
+
+**Leave `advertise-addresses` empty.** Empty means Geyser advertises its own LAN
+address *and* the public address it discovers via STUN, so one server entry works
+both at home and from outside. Pinning it to the public IP breaks every LAN player
+on any router without NAT hairpinning, which is most of them.
+
+Once every player is on 26.60 or later you can set `transport: nethernet` and
+`webrtc-port: 0`, then retire the UDP 38315 forwarding rules.
+
+Signaling is served over plain HTTP, so players accept a one-time "trust on first
+use" prompt per device. Serving it over HTTPS removes the prompt, but only do that
+with a certificate whose renewal you trust: an expired certificate on signaling is
+worse than no certificate.
 
 ## Server Management
 
@@ -449,6 +501,52 @@ mcrcon -H localhost -P 25575 -p your_secure_password "op PlayerName"
 /gamerule locator_bar true
 ```
 
+## Gamerules - Two Traps Worth Knowing
+
+These caused a player to lose a full inventory on a server where `keepInventory`
+was, as far as anyone knew, switched on.
+
+### 1. Gamerules are per world, not per server
+
+`/gamerule` applies **only to the world you are standing in**. The Nether and the
+End are separate worlds with their own `level.dat` and their own rules, so setting
+a rule in the overworld leaves them untouched. Set them explicitly:
+
+```bash
+/execute in minecraft:overworld  run gamerule keep_inventory true
+/execute in minecraft:the_nether run gamerule keep_inventory true
+/execute in minecraft:the_end    run gamerule keep_inventory true
+```
+
+Check each one the same way:
+
+```bash
+/execute in minecraft:the_nether run gamerule keep_inventory
+```
+
+### 2. Gamerule names are snake_case on 1.21.11
+
+`/gamerule keepInventory` is **rejected** with "Incorrect argument for command". The
+old camelCase names no longer exist, so a rule you believe you set may never have
+been set at all. Use `keep_inventory`, `immediate_respawn`, `locator_bar`, and so on.
+
+### Confirming what is really in effect
+
+Values are stored per world under `Data.game_rules` in each `level.dat`, namespaced
+as `minecraft:keep_inventory`. Run `save-all` before reading them off disk, or query
+the running server over RCON, which is authoritative.
+
+### Where a death actually happened
+
+Player data records it, which settles "but keepInventory was on" arguments quickly:
+
+```
+LastDeathLocation = { pos: [-17, 58, 114], dimension: "minecraft:the_nether" }
+```
+
+The death message in the log does **not** name the dimension, so this field is the
+only reliable way to tell which world's rules applied.
+
 ## Configuration Files
 
 | File | Purpose |
@@ -468,12 +566,21 @@ mcrcon -H localhost -P 25575 -p your_secure_password "op PlayerName"
 | `scripts/auto-update.sh` | Check and install updates (run via systemd timer) |
 | `scripts/update-plugins.sh` | Manual plugin update (Geyser/Floodgate/ViaVersion) |
 | `scripts/backup.sh` | Backup world data and configs |
+| `scripts/ddns-update.sh` | Keep a DuckDNS hostname on the current public IP (run via systemd timer; installs to `/home/minecraft/ddns/update.sh`) |
+| `scripts/ddns.conf.template` | Template for the updater's credentials - copy, fill in, `chmod 600`, never commit |
 
 ## Installed Plugins
 
-1. **Geyser-Spigot** - Allows Bedrock players to connect
-2. **Floodgate** - Bedrock players don't need Java accounts
+1. **Geyser-Spigot** - Allows Bedrock players to connect (build 1237+ required for NetherNet)
+2. **Floodgate** - Bedrock players don't need Java accounts; their names gain a leading `.`
 3. **ViaVersion** - Version compatibility support
+4. **spark** - Profiler, used on demand
+
+Keep exactly one jar per plugin in `plugins/`. Two jars declaring the same plugin
+name (for example `ViaVersion.jar` alongside `ViaVersion-5.7.0.jar`) make Paper log
+`Ambiguous plugin name` and load one of them arbitrarily, so you cannot be sure which
+build is running. Move retired jars out of `plugins/` rather than renaming them in
+place.
 
 ## Port Forwarding (For Remote Friends)
 
@@ -506,9 +613,25 @@ For WiFi, use `interface wlan0` instead. Reboot after saving.
 | Service | External Port | Internal Port | Protocol | Internal IP |
 |---------|---------------|---------------|----------|-------------|
 | Minecraft Java | 25565 | 25565 | TCP | 192.168.1.100 |
-| Minecraft Bedrock | 19132 | 19132 | UDP | 192.168.1.100 |
+| Bedrock gameplay (RakNet) | 38314 | 38314 | UDP | 192.168.1.100 |
+| NetherNet signaling | 38314 | 38314 | **TCP** | 192.168.1.100 |
+| NetherNet gameplay | 38315 | 38315 | UDP | 192.168.1.100 |
+
+Use whatever Bedrock port your `config.yml` sets; 38314/38315 are this server's.
+The **TCP** signaling rule is the one people forget, and without it no current
+Bedrock client can connect from outside at all.
 
 4. Save and apply changes
+
+**If you are behind two routers (double NAT)**, every rule above is needed on each
+of them. Check whether your router's WAN address is itself private (192.168.x.x,
+10.x.x.x, or 100.64-127.x.x): if it is, there is another router upstream, and the
+inner router's rules alone will not get traffic through. Point the upstream rules at
+the inner router's WAN address, not at the Pi.
+
+Note that many consumer routers cannot loop a connection to their own public address
+back inside (no NAT hairpinning), so **you cannot test forwarding from your own LAN**.
+A timeout from inside proves nothing; test from mobile data instead.
 
 ### Step 3: Test Port Forwarding
 
@@ -517,13 +640,56 @@ Visit https://canyouseeme.org and check port 25565. If it shows "Success", you'r
 ### Step 4: Share Your Address
 
 - Find your public IP: https://whatismyip.com
-- Share with friends: `your-public-ip:25565` (Java) or `your-public-ip:19132` (Bedrock)
+- Share with friends: `your-public-ip:25565` (Java) or `your-public-ip:38314` (Bedrock)
 
 ## Dynamic DNS (Friendly Web Address)
 
 Instead of sharing your IP address (which can change), use a free Dynamic DNS service to get a memorable hostname like `myserver.duckdns.org`.
 
-### Option 1: DuckDNS (Recommended - Free Forever)
+> **Why this matters more than it looks.** A dynamic address that nobody tracks is
+> the classic silent outage: external play simply stops working one day, and because
+> LAN players are unaffected it gets reported as "the server is broken" rather than
+> as a DNS problem. It can go unnoticed for months.
+
+### Option 0: As deployed on this server (systemd timer, own domain)
+
+This is what is actually running. It keeps the token out of the script and the main
+domain's DNS untouched:
+
+1. Register a DuckDNS subdomain and note its token.
+2. At your own DNS host, point your game subdomain at it with a **CNAME**
+   (delete any existing A record for that name first - DNS does not allow both on
+   one name). The CNAME is permanent; only the DuckDNS A record moves.
+3. Install the updater:
+
+```bash
+mkdir -p /home/minecraft/ddns
+cp scripts/ddns-update.sh /home/minecraft/ddns/update.sh
+cp scripts/ddns.conf.template /home/minecraft/ddns/ddns.conf
+chmod 755 /home/minecraft/ddns/update.sh
+chmod 600 /home/minecraft/ddns/ddns.conf
+nano /home/minecraft/ddns/ddns.conf          # fill in subdomain and token
+
+sudo cp etc/systemd/system/ddns-update.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ddns-update.timer
+```
+
+Check it with `tail /home/minecraft/ddns/ddns.log` - it only writes a line when the
+address actually changes, so a short log is a healthy log.
+
+`ddns.conf` holds a credential and is listed in `.gitignore`. Never commit it.
+
+**Known DuckDNS API quirks**, worth knowing before scripting against it:
+
+- `clear=true` clears the **IP**, not the TXT record, despite what the spec says.
+- A `txt=` value will not be overwritten once set.
+- Calling the update endpoint with `txt=` but no `ip=` clears the A record.
+
+Together these rule out DNS-01 certificate issuance through DuckDNS, because ACME
+renewal needs to write a fresh TXT value every time.
+
+### Option 1: DuckDNS with cron (simpler, token lives in the script)
 
 **1. Create Account and Domain**
 - Visit https://www.duckdns.org
@@ -579,7 +745,7 @@ Save and exit. Your IP will now auto-update every 5 minutes.
 
 **5. Share Your Address**
 
-Give friends: `myminecraft.duckdns.org` (Java) or `myminecraft.duckdns.org:19132` (Bedrock)
+Give friends: `myminecraft.duckdns.org` (Java) or `myminecraft.duckdns.org:38314` (Bedrock)
 
 ### Option 2: No-IP (Free with Monthly Renewal)
 
@@ -647,7 +813,7 @@ sudo systemctl status cron
 **Can't connect from outside?**
 - Verify port forwarding is set up correctly
 - Check ports are open: https://canyouseeme.org
-- Ensure Pi firewall allows connections: `sudo ufw allow 25565 && sudo ufw allow 19132`
+- If a firewall is configured on the Pi, allow the ports listed under Port Forwarding (this server runs without one, so exposure is governed entirely by the routers)
 
 ## Changing Server Ports (Optional)
 
@@ -802,7 +968,7 @@ UUID=your-uuid-here  /mnt/ssd  ext4  defaults,auto,nofail  0  2
 
 ### Can't Connect
 - Local network: Use Pi's local IP (not DuckDNS address)
-- Bedrock: Check you're using the correct Bedrock port (default 19132)
+- Bedrock: Check you are using the correct Bedrock port (38314 on this server; Geyser's own default is 19132)
 - Firewalls: Ensure ports are open
 
 ### "Tried to log in as Java Edition player" Error (Bedrock)
